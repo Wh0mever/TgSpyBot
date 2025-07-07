@@ -1,0 +1,92 @@
+version: '3.8'
+
+services:
+  # Redis для хранения данных
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    container_name: tgspybot-redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-}
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - tgspybot-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # Основное приложение TgSpyBot
+  tgspybot:
+    build: .
+    restart: unless-stopped
+    container_name: tgspybot-app
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./.env:/app/.env:ro
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      - DATABASE_TYPE=redis
+    networks:
+      - tgspybot-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
+      interval: 60s
+      timeout: 30s
+      retries: 3
+      start_period: 60s
+
+  # Контейнер для мониторинга логов (опционально)
+  logviewer:
+    image: amir20/dozzle:latest
+    restart: unless-stopped
+    container_name: tgspybot-logs
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "8080:8080"
+    networks:
+      - tgspybot-network
+    profiles:
+      - monitoring
+
+  # Backup контейнер для Redis
+  redis-backup:
+    image: redis:7-alpine
+    restart: "no"
+    container_name: tgspybot-backup
+    depends_on:
+      - redis
+    volumes:
+      - ./backups:/backups
+      - redis_data:/data:ro
+    networks:
+      - tgspybot-network
+    profiles:
+      - backup
+    command: >
+      sh -c "
+        while true; do
+          redis-cli -h redis -p 6379 ${REDIS_PASSWORD:+-a $REDIS_PASSWORD} --rdb /backups/dump-$$(date +%Y%m%d-%H%M%S).rdb
+          find /backups -name '*.rdb' -mtime +7 -delete
+          sleep 86400
+        done
+      "
+
+volumes:
+  redis_data:
+    driver: local
+
+networks:
+  tgspybot-network:
+    driver: bridge 
